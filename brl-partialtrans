@@ -1,0 +1,157 @@
+#!/usr/bin/ruby
+
+require 'sinatra'
+require 'open3'
+require 'rubyXL'
+require 'tempfile'
+
+class TableSpec
+  attr_reader :category, :name, :opcode, :data
+
+  def initialize(category, name, opcode, data)
+    @category = category
+    @name = name
+    @opcode = opcode
+    @data = data
+  end
+end
+
+before do
+  @tablespecs = Array.new
+  tablespec_xls = RubyXL::Parser.parse("contractions.xlsx")
+  tablespec_xls[0].each do |row|
+    @tablespecs.push TableSpec.new(row[0].value, row[1].value, row[2].value, row[3].value) unless row[0].value == "Category" or !row[2]
+  end
+  @brlchars = {
+    'a' => '1',    'b' => '12',    'c' => '14',   'd' => '145',   'e' => '15',
+    'f' => '124',  'g' => '1245',  'h' => '125',  'i' => '24',    'j' => '245',
+    'k' => '13',   'l' => '123',   'm' => '134',  'n' => '1345',  'o' => '135',
+    'p' => '1234', 'q' => '12345', 'r' => '1235', 's' => '234',   't' => '2345',
+    'u' => '136',  'v' => '1236',  'w' => '2456', 'x' => '1346',  'y' => '13456',
+    'z' => '1356'
+  }
+end
+
+# convert a string of mixed dot definitions and characters to pure dot definitions
+# e.g. "se-12" = "234-15-12"
+def chars_to_dots(chardot_str)
+  dotmod_def = ""
+  chardot_str.each_char do |char|
+    if @brlchars.include? char then
+      dotmod_def += @brlchars[char] + "-"
+    else
+      dotmod_def += char
+    end
+  end
+  dotmod_def.gsub!(/--/, "-")
+  dotmod_def.gsub!(/-\|/, "|")
+  dotmod_def.gsub!(/-$/, "")
+
+  return dotmod_def
+end
+
+def create_new_table(base_table, table_outfile, requested_translations)
+  tablespecs_to_use = Array.new
+  @tablespecs.each do |tablespec|
+    # we only care about things to /not/ translate, since we patch those out
+    # so skip anything we do translate
+    if(!requested_translations.has_key? tablespec.name) then
+      tablespecs_to_use.push tablespec
+      STDERR.puts "Patching table to skip translation of #{tablespec.name}."
+    else
+      STDERR.puts "Translating #{tablespec.name}."
+    end
+  end
+      
+  File.foreach(base_table).with_index do |line, line_nbr|
+    # skip all nofor lines as they're ignored for forward translation anyway
+    # and it speeds the process up to skip them
+    next if /nofor/.match(line)
+
+    tablespecs_to_use.each do |tablespec|
+      case tablespec.opcode
+        when "matchalways"
+          next if !/^\s*always\s+#{Regexp.escape(tablespec.data)}\b/.match(line) and !/\s*match\s+\S+\s+#{Regexp.escape(tablespec.data)}\b/.match(line)
+          #STDERR.puts "Patching out (matchalways) #{line.strip}."
+          line = "# patched out (matchalways #{tablespec.name})"
+
+        when "midendword"
+          next if !/^\s*midendword\s+#{Regexp.escape(tablespec.data)}\b/.match(line)
+          #STDERR.puts "Patching out (midendword) #{line.strip}."
+          line = "# patched out (midendword #{tablespec.name})"
+          
+        when "word"
+          next if !/^\s*word\s+#{Regexp.escape(tablespec.data)}\b/.match(line)
+          #STDERR.puts "Patching out (word) #{line.strip}."
+          line = "# patched out (word #{tablespec.name})"
+          
+        when "regexsubst"
+          subst_parts = tablespec.data.split "|"
+          replace_text = subst_parts[0..-2].join("|")
+          replace_with = subst_parts[-1]
+          next if !/#{replace_text}/.match(line)
+          newline = line.gsub(/#{replace_text}/, replace_with)
+          #STDERR.puts "Substitution patching (#{tablespec.name}) #{line.strip} to #{newline.strip}."
+          line = newline
+
+        when "dotmod"
+          dotmod_def = chars_to_dots(tablespec.data)
+          from_dots, to_dots = dotmod_def.split "|"
+          next if !/(\s+|-)#{from_dots}(-|\Z|\s)/
+          newline = line.gsub(/(\s+|-)#{from_dots}(-|\Z|\s)/, '\1' + to_dots + '\2')
+          #STDERR.puts "Dotmod patching (#{tablespec.name}) #{line.strip} to #{newline.strip}."
+          line = newline
+
+        when "smartdotmod"
+          if(/^\s*always\s+\S+/.match(line)) then
+            matches = /^\s*always\s+(\S+)/.match(line)
+            next if !matches[1].include?(tablespec.name)
+            puts "smartdotmod alwaysmatched #{matches[1]} for #{tablespec.name}"
+          elsif(/\s*match\s+\S+\s+\S+/.match(line)) then
+            matches = /\s*match\s+\S+\s+(\S+)/.match(line)
+            next if !matches[1].include?(tablespec.name)
+            puts "smartdotmod matchmatched #{matches[1]} for #{tablespec.name}"
+          else
+            next
+          end
+
+          dotmod_def = chars_to_dots(tablespec.data)
+          from_dots, to_dots = dotmod_def.split "|"
+          next if !/(\s+|-)#{from_dots}(-|\Z|\s)/
+          newline = line.gsub(/(\s+|-)#{from_dots}(-|\Z|\s)/, '\1' + to_dots + '\2')
+          STDERR.puts "SmartDotmod patching (#{tablespec.name}) #{line.strip} to #{newline.strip}."
+          line = newline
+          
+        else
+          #STDERR.puts "Unknown opcode in tablespec #{tablespec.opcode}, skipping."
+      end
+    end
+    table_outfile.puts line
+  end
+
+  table_outfile.flush
+end
+
+get '/' do
+  haml :index
+end
+
+post '/' do
+  content_type "text/plain"
+  textfile = params[:file][:tempfile]
+  raw_text = textfile.read
+  
+  trans_requested = params[:trans] || Hash.new
+  tbl_tempfile = Tempfile.new($0)
+  base_table = "/usr/share/liblouis/tables/en-ueb-g2.ctb"
+  create_new_table(base_table, tbl_tempfile, trans_requested)
+  
+  translated_brl, translation_err, status = Open3.capture3("/usr/bin/lou_translate -f #{tbl_tempfile.path}", :stdin_data => raw_text)
+  STDERR.puts system("cp #{tbl_tempfile.path} /tmp/tabletemp")
+  tbl_tempfile.close
+  tbl_tempfile.unlink
+
+  STDERR.puts translation_err
+  translated_brl
+end
+

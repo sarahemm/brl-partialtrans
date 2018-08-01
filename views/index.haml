@@ -1,0 +1,18 @@
+!!!
+%html
+  %head
+    %title Braille Partial Forward Translator
+  %body
+    %h1 Braille Partial Forward Translator
+    %form{:name => "brltrans", :method => "post", :enctype=>"multipart/form-data"}
+      %ul
+        %li
+          %label{:for => "file"} Text File:
+          %input{:type => "file", :name => "file"}
+        %fieldset
+          - @tablespecs.each do |contraction|
+            %li
+              %input{:type => "checkbox", :name => "trans[#{contraction.name}]"}
+              %label{:for => "trans[#{contraction.name}]"} #{contraction.category} - #{contraction.name}
+        %li
+          %input{:type => "submit", :value => "Translate", :class => "button"}
