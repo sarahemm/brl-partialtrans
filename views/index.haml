@@ -10,7 +10,7 @@
           %label{:for => "file"} Text File:
           %input{:type => "file", :name => "file"}
         %fieldset
-          - @tablespecs.each do |contraction|
+          - @tablespecs.uniq { |item| item.name }.each do |contraction|
             %li
               %input{:type => "checkbox", :name => "trans[#{contraction.name}]"}
               %label{:for => "trans[#{contraction.name}]"} #{contraction.category} - #{contraction.name}
